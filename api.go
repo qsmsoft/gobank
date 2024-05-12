@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 )
 
 func WriteJSON(w http.ResponseWriter, status int, v any) error {
@@ -16,7 +18,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) error {
 type apiFunc func(http.ResponseWriter, *http.Request) error
 
 type ApiError struct {
-	Error string
+	Error string `json:"error"`
 }
 
 func makeHTTPHandleFunc(f apiFunc) http.HandlerFunc {
@@ -47,6 +49,7 @@ func (s *APIServer) Run() {
 
 	mux.HandleFunc("/account", makeHTTPHandleFunc(s.handleAccount))
 	mux.HandleFunc("/account/{id}", makeHTTPHandleFunc(s.handleGetAccountByID))
+	mux.HandleFunc("/transfer", makeHTTPHandleFunc(s.handleTransfer))
 
 	log.Println("JSON API server running on port", s.listenAddr)
 	err := http.ListenAndServe(s.listenAddr, mux)
@@ -64,10 +67,6 @@ func (s *APIServer) handleAccount(w http.ResponseWriter, r *http.Request) error 
 		return s.handleCreteAccount(w, r)
 	}
 
-	if r.Method == "DELETE" {
-		return s.handleDeleteAccount(w, r)
-	}
-
 	return fmt.Errorf("method not allowed %s", r.Method)
 }
 
@@ -81,10 +80,26 @@ func (s *APIServer) handleGetAccount(w http.ResponseWriter, r *http.Request) err
 }
 
 func (s *APIServer) handleGetAccountByID(w http.ResponseWriter, r *http.Request) error {
-	id := r.PathValue("id")
-	fmt.Println(id)
+	if r.Method == "GET" {
 
-	return WriteJSON(w, http.StatusOK, &Account{})
+		id, err := getID(r)
+		if err != nil {
+			return err
+		}
+
+		account, err := s.store.GetAccountID(id)
+		if err != nil {
+			return err
+		}
+
+		return WriteJSON(w, http.StatusOK, account)
+	}
+
+	if r.Method == "DELETE" {
+		return s.handleDeleteAccount(w, r)
+	}
+
+	return fmt.Errorf("method not allowed %s", r.Method)
 }
 
 func (s *APIServer) handleCreteAccount(w http.ResponseWriter, r *http.Request) error {
@@ -102,9 +117,39 @@ func (s *APIServer) handleCreteAccount(w http.ResponseWriter, r *http.Request) e
 }
 
 func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	id, err := getID(r)
+	if err != nil {
+		return err
+	}
+	if err := s.store.DeleteAccount(id); err != nil {
+		return err
+	}
+
+	return WriteJSON(w, http.StatusOK, map[string]int{"deleted": id})
 }
 
 func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	transferReq := new(TransferRequest)
+	if err := json.NewDecoder(r.Body).Decode(transferReq); err != nil {
+		return err
+	}
+
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(r.Body)
+
+	return WriteJSON(w, http.StatusOK, transferReq)
+}
+
+func getID(r *http.Request) (int, error) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return id, fmt.Errorf("invaild id given: %s", idStr)
+	}
+
+	return id, nil
 }
