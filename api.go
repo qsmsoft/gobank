@@ -31,19 +31,54 @@ func createJWT(account *Account) (string, error) {
 	return token.SignedString([]byte(secret))
 }
 
-func withJWTAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
+func permissionDenied(w http.ResponseWriter) {
+	err := WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "permission denied"})
+	if err != nil {
+		return
+	}
+}
+
+func withJWTAuth(handlerFunc http.HandlerFunc, s Storage) http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("calling JWT auth middleware")
-		tokenString := r.Header.Get("Authorization")
 
-		_, err := validateJWT(tokenString)
+		tokenString := r.Header.Get("Authorization")
+		token, err := validateJWT(tokenString)
 		if err != nil {
-			err := WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "Unauthorized"})
+			permissionDenied(w)
+			return
+		}
+
+		if !token.Valid {
+			permissionDenied(w)
+			return
+		}
+
+		userID, err := getID(r)
+		if err != nil {
+			permissionDenied(w)
+			return
+		}
+
+		account, err := s.GetAccountID(userID)
+		if err != nil {
+			permissionDenied(w)
+			return
+		}
+
+		claims := token.Claims.(jwt.MapClaims)
+
+		if account.Number != int64(claims["accountNumber"].(float64)) {
+			permissionDenied(w)
+			return
+		}
+
+		if err != nil {
+			err := WriteJSON(w, http.StatusForbidden, ApiError{Error: "Unauthorized"})
 			if err != nil {
 				return
 			}
-			return
 		}
 
 		handlerFunc(w, r)
@@ -105,7 +140,7 @@ func (s *APIServer) Run() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/account", makeHTTPHandleFunc(s.handleAccount))
-	mux.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandleFunc(s.handleGetAccountByID)))
+	mux.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandleFunc(s.handleGetAccountByID), s.store))
 	mux.HandleFunc("/transfer", makeHTTPHandleFunc(s.handleTransfer))
 
 	log.Println("JSON API server running on port", s.listenAddr)
