@@ -3,16 +3,73 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 )
 
 func WriteJSON(w http.ResponseWriter, status int, v any) error {
 	w.Header().Add("Content-Type", "application/json")
 	w.WriteHeader(status)
+
 	return json.NewEncoder(w).Encode(v)
+}
+
+func createJWT(account *Account) (string, error) {
+	claims := &jwt.MapClaims{
+		"ExpiresAt":     jwt.NewNumericDate(time.Unix(1516239022, 0)),
+		"accountNumber": account.Number,
+	}
+
+	secret := os.Getenv("JWT_SECRET")
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	return token.SignedString([]byte(secret))
+}
+
+func withJWTAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("calling JWT auth middleware")
+		tokenString := r.Header.Get("Authorization")
+
+		_, err := validateJWT(tokenString)
+		if err != nil {
+			err := WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "Unauthorized"})
+			if err != nil {
+				return
+			}
+			return
+		}
+
+		handlerFunc(w, r)
+	}
+}
+
+func validateJWT(tokenString string) (*jwt.Token, error) {
+	secret := os.Getenv("JWT_SECRET")
+
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		return []byte(secret), nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid token")
+	}
+
+	return token, nil
 }
 
 type apiFunc func(http.ResponseWriter, *http.Request) error
@@ -48,7 +105,7 @@ func (s *APIServer) Run() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/account", makeHTTPHandleFunc(s.handleAccount))
-	mux.HandleFunc("/account/{id}", makeHTTPHandleFunc(s.handleGetAccountByID))
+	mux.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandleFunc(s.handleGetAccountByID)))
 	mux.HandleFunc("/transfer", makeHTTPHandleFunc(s.handleTransfer))
 
 	log.Println("JSON API server running on port", s.listenAddr)
@@ -112,6 +169,13 @@ func (s *APIServer) handleCreteAccount(w http.ResponseWriter, r *http.Request) e
 	if err := s.store.CreateAccount(account); err != nil {
 		return err
 	}
+
+	tokenSting, err := createJWT(account)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("JWT token: ", tokenSting)
 
 	return WriteJSON(w, http.StatusOK, account)
 }
